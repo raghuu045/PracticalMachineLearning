@@ -1,0 +1,285 @@
+---
+title: "Practical Machine Learning Course project"
+author: "Raghu"
+date: "January 3, 2017"
+output: html_document
+---
+
+```{r, echo=TRUE}
+library(caret, quietly = TRUE)
+library(rpart, quietly = TRUE)
+library(rpart.plot, quietly = TRUE)
+library(rattle, quietly = TRUE)
+library(randomForest, quietly = TRUE)
+library(e1071, quietly = TRUE)
+library(parallel, quietly = TRUE)
+library(doParallel, quietly = TRUE)
+library(gbm, quietly = TRUE)
+library(knitr, quietly = TRUE)
+```
+
+## Executive Summary
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible
+to collect a large amount of data about personal activity relatively 
+inexpensively. These type of devices are part of the quantified self movement 
+- a group of enthusiasts who take measurements about themselves regularly to
+improve their health, to find patterns in their behavior, or because they are 
+tech geeks. One thing that people regularly do is quantify how much of a 
+particular activity they do, but they rarely quantify how well they do it. In 
+this project, your goal will be to use data from accelerometers on the belt,
+forearm, arm, and dumbell of 6 participants. They were asked to perform barbell
+lifts correctly and incorrectly in 5 different ways. More information is 
+available from the website here: http://groupware.les.inf.puc-rio.br/har 
+(see the section on the Weight Lifting Exercise Dataset).
+
+### Data
+The training data for this project are available here:
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here:
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+The data for this project come from this 
+source: http://groupware.les.inf.puc-rio.br/har. If you use the document you 
+create for this class for any purpose please cite them as they have been very
+generous in allowing their data to be used for this kind of assignment.
+
+## Question
+The goal of your project is to predict the manner in which they did the 
+exercise. This is the "classe" variable in the training set. You may use any 
+of the other variables to predict with. You should create a report describing 
+how you built your model, how you used cross validation, what you think the 
+expected out of sample error is, and why you made the choices you did. You will
+also use your prediction model to predict 20 different test cases.
+
+## Getting Data
+Download training and testing set and read into R by making all blanks as NAs. 
+```{r, echo=TRUE}
+urlTraining <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+download.file(url=urlTraining, destfile="./pml-training.csv")
+Training <- read.csv("./pml-training.csv",
+                         header = TRUE, 
+                         na.strings=c("NA",""))
+
+                         
+urlTesting <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+download.file(url=urlTesting, destfile="./pml-testing.csv")
+Testing <- read.csv("./pml-testing.csv",
+                        header = TRUE, 
+                        na.strings=c("NA",""))
+
+```
+Validate all variables are same across Training and Testing datasets
+```{r, echo=TRUE}
+## read the column names from training and testing set
+colnamesTraining <- colnames(Training)  
+colnamesTesting <- colnames(Testing)
+
+## Verify that the column names (excluding classe and problem_id as they are 
+## outcomes) are identical in the training and testing set.
+all.equal(colnamesTraining[1:length(colnamesTraining)-1], 
+          colnamesTesting[1:length(colnamesTesting)-1])
+```
+
+check the dimension of the datasets 
+```{r, echo=TRUE}
+dim(Training); dim(Testing)
+```
+
+The Testing dataset refers to the 20 test cases where we will use our 
+prediction model to predict. Hence the Training dataset will be partitioned to 
+myTrain and myTest datasets to train the model on mytrain set and apply on 
+myTest set to pick the best model. 
+```{r, echo=TRUE}
+set.seed(8643)
+inTrain <- createDataPartition(Training$classe, p=0.7, list=FALSE)
+myTrain <- Training[inTrain, ]
+myTest <- Training[-inTrain, ]
+dim(myTrain); dim(myTest)
+```
+
+##Identify features
+Remove the variables which are not significant for prediction from myTrain
+dataset
+```{r, echo=TRUE}
+set.seed(8643)
+## Remove zero variance columns. These have the same value for most of 
+## the collected samples.
+nzv <- nearZeroVar(myTrain, saveMetrics=TRUE)
+myTrain <- myTrain[,nzv$nzv==FALSE]
+
+## Remove the first column from myTest data set, as it is only the row number. 
+myTrain <- myTrain[c(-1)]
+
+# Count the number of NAs in each column.
+NAs <- function(x) {
+        as.vector(apply(x, 2, function(x) length(which(is.na(x)))))
+}
+
+## Build a vector with number of NAs corresponding to each column in myTrain
+## data set
+NAscnts <- NAs(myTrain)
+
+## identify columns which has more than 70% of NAs
+drops <- c()
+for (cnt in 1:length(NAscnts)) {
+        if (NAscnts[cnt] / nrow(myTrain) > .7 ) {
+                drops <- c(drops, colnames(myTrain)[cnt])
+        }
+}
+
+## Drop the columns which has more than 70% of NAs. These don't hold much data
+## to use it for our prediction.
+myTrain <- myTrain[,!(colnames(myTrain) %in% drops)]
+```
+
+
+## Algorithm
+Train various models on myTrain dataset. 
+Perform the model building using multiple ways. Without any 
+pre-processing, pre-processing (to standardize the variables) and 
+cross validation (Splits the training set into training and test sets, 
+builds the model on training set and evaluate on test set, repeats this 
+process and average the estimated errors. This will give an estimate of 
+what will happen when we get a new data set).
+
+### Prediction with Trees
+These models are easy to interpret. It iteratively splits variables into 
+groups to evaluate homogenity within each group.  
+```{r, echo=TRUE}
+set.seed(8643)
+## Prediction using bootstrapping. Fig 1 in Appendix shows the rpart fancy plot. 
+modFitDT <- train(classe ~ ., method="rpart", data=myTrain)
+## Prediction using bootstrapping and pre-processing. 
+modFitDT1 <- train(classe ~ ., preProcess=c("center", "scale"), 
+method="rpart", data=myTrain)
+## Prediction using pre-processing and cross validation
+modFitDT2 <- train(classe ~ ., preProcess=c("center", "scale"),
+trControl=trainControl(method = "cv", number = 4), method="rpart", 
+data=myTrain)
+```
+### Prediction using Random Forest
+This is an extension to classification trees. Bootstrap samples, rebuild 
+classification trees for each of those samples.And at each split, bootstrapping
+happens at variables level. So only a subset of variables are considered at
+each split. This way a large number of diverse trees are built and averaged
+on them to get the prediction for a new outcome. 
+```{r, echo=TRUE}
+set.seed(8643)
+## Prediction using cross validation
+fitControl <- trainControl(method = "cv",
+                           number = 4,
+                           allowParallel = TRUE)
+## Enable Parallel processing
+cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(cluster)
+## Fit the model
+modFitrf <- train(classe ~ ., data=myTrain, method = "rf", 
+                  trControl = fitControl, prox=TRUE)
+## Disable parallel processing
+stopCluster(cluster)
+registerDoSEQ()
+```
+### Prediction using Boosting
+Takes in lots of weak predictors, weight them and add them up to get a 
+stronger predictor. 
+```{r, echo=TRUE}
+set.seed(8643)
+## Prediction using cross validation
+fitControl <- trainControl(method = "cv",
+                           number = 4,
+                           allowParallel = TRUE)
+## Enable Parallel processing
+cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(cluster)
+## Fit the model
+modFitgm <- train(classe ~ ., data=myTrain, method = "gbm", 
+                  trControl = fitControl, verbose = FALSE)
+## Disable parallel processing
+stopCluster(cluster)
+registerDoSEQ()
+```
+
+## Evaluation
+Evaluate the models on myTest dataset. 
+
+### Prediction with Trees
+```{r, echo=TRUE}
+set.seed(8643)
+# Prediction using bootstrapping 
+predictionDT <- predict(modFitDT, myTest)
+cmDT <- confusionMatrix(predictionDT, myTest$classe)
+cmDT$overall
+# Prediction using bootstrapping and pre-processing
+predictionDT1 <- predict(modFitDT1, myTest)
+cmDT1 <- confusionMatrix(predictionDT1, myTest$classe)
+cmDT1$overall
+# Prediction using pre-processing and cross validation 
+predictionDT2 <- predict(modFitDT2, myTest)
+cmDT2 <- confusionMatrix(predictionDT2, myTest$classe)
+cmDT2$overall
+```
+
+### Prediction using Random Forest
+Refer fig 2 in appendix for the confusion matrix
+```{r, echo=TRUE}
+set.seed(8643)
+# Prediction using cross validation
+predictionrf <- predict(modFitrf, myTest)
+cmrf <- confusionMatrix(predictionrf, myTest$classe)
+cmrf$overall
+```
+### Prediction using Boosting
+Refer fig 3 in appendix for the confusion matrix
+```{r, echo=TRUE}
+set.seed(8643)
+# Prediction using cross validation
+predictiongm <- predict(modFitgm, myTest)
+cmgm <- confusionMatrix(predictiongm, myTest$classe)
+cmgm$overall
+```
+
+## Identifying the best prediction model 
+The following are the out of Sample error rates for the models: 
+```{r, echo=FALSE}
+print(paste("Prediction with trees (bootstrapping)",
+            "(1- cmDT$overall['Accuracy']) :", 
+            (1- cmDT$overall['Accuracy'])))
+print(paste("Prediction with trees (pre-processing and bootstrapping)",
+            "(1- cmDT1$overall['Accuracy']) :", 
+            (1- cmDT1$overall['Accuracy'])))
+print(paste("Prediction with trees (pre-processing and cross validation)",
+            "(1- cmDT2$overall['Accuracy']) :", 
+            (1- cmDT2$overall['Accuracy'])))
+print(paste("Prediction using Random Forest (cross validation)",
+            "(1- cmrf$overall['Accuracy']) :", 
+            (1- cmrf$overall['Accuracy'])))
+print(paste("Prediction using Boosting (cross validation)",
+            "(1- cmgm$overall['Accuracy']) :", 
+            (1- cmgm$overall['Accuracy'])))
+```
+Prediction using Random Forest has the least out of sample error rate. 
+
+## Predicting Results on the Testing Data
+Prediction using Random Forest with cross validation had high accuracy rate of 99.88% on myTest dataset compared to rest of the performed models on myTest dataset. The expected out-of-sample error rate is 100 - 99.88 = 0.12%. Hence using Random Forest model object to predict the test cases.
+```{r, echo=TRUE}
+set.seed(8643)
+predTestingrf <- predict(modFitrf, Testing)
+predTestingrf
+```
+
+## Appendix
+###Figure 1 (Decision tree for prediction using bootstrapping)
+```{r, echo=TRUE}
+fancyRpartPlot(modFitDT$finalModel)
+```
+
+###Figure 2 (Confusion matrix for random Forest)
+```{r, echo=TRUE}
+cmrf
+```
+
+###Figure 3 (Confusion matrix for Boosting)
+```{r, echo=TRUE}
+cmgm
+```
